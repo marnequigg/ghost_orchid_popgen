@@ -1,0 +1,665 @@
+---
+title: "ghostie"
+author: "m quigg"
+date: "2026-06-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Ghost Orchid Pop Gen
+This markdown is to analyze the population genetics of the ghost orchid for the University of Florida study. I used plink to generate the PCA while retaining individuals that have <50% missing data.
+
+## Prep
+
+### Libraries
+```{r, include=FALSE}
+#libraries
+library(adegenet)
+library(vcfR)
+library(tidyverse)
+library(pinfsc50)
+library(dplyr)
+library(poppr)
+library(pegas)
+library(PopGenReport)
+library(hierfstat)
+library(paletteer)
+library(patchwork)
+library(mapmixture)
+library(gridExtra)
+library(geodist)
+library(vegan)
+library(tinytex)
+library(algatr)
+library(maps)
+library(tess3r)
+library(rworldmap)
+library(wingen)
+library(terra)
+library(raster)
+library(viridis)
+library(sf)
+library(reshape2)
+```
+
+###Set Up
+```{r}
+#set working directory
+setwd("C:/Users/mquig/Desktop/ghost_orchid")
+
+#create custom color palette
+custom_colors_ghost=c("#C969A1FF", "#EB7926FF", "#859B6CFF","#004F63FF", "#592688")
+```
+
+### Import metadata
+```{r}
+###import
+meta=read.csv("input_data/metadata.csv", header = TRUE)
+
+###clean
+meta_clean <- meta %>% 
+  dplyr::select(-c(X, X.1, X.2)) %>% 
+  rename(Sample_ID = Sample..) %>% 
+  separate(Sample_ID, into = c("Remove", "ind"), sep = "#") %>% 
+  dplyr::select(-Remove) %>% 
+  mutate(
+    Group = case_when(
+      Site == "1" ~ "1",
+      Site %in% c("2", "5", "6", "7", "8", "9") ~ "2",
+      Site %in% c("10", "11") ~ "3",
+      Site == "3" ~ "4",
+      Site == "4" ~ "5"))
+```
+
+## PCA
+I want to start by making a PCA to see if we see clustering at all.
+```{r}
+###import the data###
+strict_pca=read_table("input_data/ghostie.eigenvec", col_names = FALSE)
+strict_eigenval=scan("input_data/ghostie.eigenval")
+
+###clean up the data###
+##remove extra ind column
+strict_pca=strict_pca[,-1]
+
+##rename the columnns##
+names(strict_pca)[1]="ind"
+names(strict_pca)[2:ncol(strict_pca)]=paste0("PC", 1:(ncol(strict_pca)-1))
+
+###calculate percetage variance explained (PVE)###
+##calculate it##
+strict_pve=data.frame(PC=1:20, pve=strict_eigenval/sum(strict_eigenval)*100)
+
+##graph it##
+ggplot(strict_pve, aes(PC, pve)) +geom_bar(stat = "identity") +
+  ylab("Percentage variance explained") +
+  theme_classic()
+#wow ok thats fairly low
+#the highest PVE is ~13, not bad
+
+##calculate the cumulative sum of the pve##
+cumsum(strict_pve$pve)
+#so PV 1,2,3 only account for 26% of the data
+
+
+###graph the PCA###
+strict_pca_plot=ggplot(strict_pca, aes(PC1, PC2))+
+  geom_point(size = 2) + 
+  #coord_equal() + 
+  theme_classic() + 
+  #geom_text(aes(label = ind), color = "black", nudge_x = 0.5, nudge_y = 0.5, size = 3) +
+  xlab(paste0("PC1 (", signif(strict_pve$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(strict_pve$pve[2], 3), "%)")) 
+  #+ labs(title = "SNPs with 'strict' VCF filtering")
+strict_pca_plot
+```
+
+### Incorporate Sites
+```{r}
+###clean up the PCA ind names
+strict_pca=strict_pca %>% 
+  separate(ind, into = c("ind", "delete"), sep = "_") %>% 
+  dplyr::select(-delete)
+
+###add metadata
+strict_pca_meta=left_join(strict_pca, meta_clean, by = "ind")
+
+###graph it
+###graph the PCA###
+sites_pca_plot=ggplot(strict_pca_meta, aes(PC1, PC2, color = as.factor(Group))) +
+  geom_point(size = 3) + 
+  #coord_equal() + 
+  theme_classic() + 
+  #geom_text(aes(label = ind), color = "black", nudge_x = 0.5, nudge_y = 0.5, size = 3) +
+  xlab(paste0("PC1 (", signif(strict_pve$pve[1], 3), "%)")) + ylab(paste0("PC2 (", signif(strict_pve$pve[2], 3), "%)")) +
+    scale_color_manual(values = c("#CE4441FF", "#EE8577FF", "#FFBB44FF", "#62929AFF", "#23469c", "#C969A1FF", "#EB7926FF", "#859B6CFF", "cornflowerblue", "#004F63FF", "#592688", "black", "cornflowerblue", "#9467bd"))+
+  labs(color = "Group")
+
+sites_pca_plot
+```
+## ADMIXTURE
+```{r}
+###import data###
+CV_strict=read_table("input_data/combined.cv.error", col_names = FALSE)
+
+
+###we have 10 replicates for each K value, so average them all###
+CV_strict_summary=CV_strict %>% 
+  group_by(X1) %>% 
+  summarize(n=length(X1),
+            mean=mean(X2),
+            sd=sd(X2),
+            se=sd/sqrt(n),
+            lower.CI=mean-(1.96*se),
+            upper.CI=mean+(1.96*se)) %>% 
+  rename(K="X1")
+
+###plot all of the CV scores
+strict_allCV_plot=ggplot(CV_strict, aes(X1, X2)) +
+  geom_point() +
+  geom_smooth(color = "forestgreen", fill = "forestgreen", linewidth = 0.5, method = "loess", alpha = 0.3) +
+  theme_classic() +
+  ggtitle("All Cross-Validation Scores from ADMIXTURE (K= 1-15)") +
+  labs(x ="Number of Populations (K)", y="Cross-Validation Score")
+strict_allCV_plot
+
+###plot the mean cross validation scores###
+strict_CV_plot=ggplot(CV_strict_summary, aes(K, mean)) +
+  geom_point() +
+  #geom_smooth() +
+  theme_classic() +
+  ggtitle("Mean Cross-Validation Scores from ADMIXTURE (K= 1-15)")
+strict_CV_plot
+```
+### Admixture plots by site
+### K=10
+For this we have 10 Sites that have sites in so we need the admixture results from K=10.
+```{r}
+###import the qmatrix data###
+qmatrix=read.table("input_data/final_ghost_strict_LDpruned.10.1.Q")
+nrow(qmatrix)
+##add the sample IDs
+qmatrix_samples=read.table("input_data/final_ghost_strict_LDpruned.fam")$V2
+rownames(qmatrix)=qmatrix_samples
+admixture_df=cbind(Sample_ID=rownames(qmatrix), qmatrix)
+
+##fix the admixture df
+admixture_df=admixture_df %>% 
+  separate(Sample_ID, into = c("ind", "del"), sep = "_") %>% 
+  dplyr::select(-del)
+  
+
+###merge the dataframes###
+admixture_df=merge(admixture_df, meta_clean, by = "ind")
+
+###clean it up###
+##rename columns
+admixture_df <- admixture_df %>%
+  dplyr::rename(
+    SampleID  = ind,
+    Cluster1  = V1,
+    Cluster2  = V2,
+    Cluster3  = V3,
+    Cluster4  = V4,
+    Cluster5  = V5,
+    Cluster6  = V6,
+    Cluster7  = V7,
+    Cluster8  = V8,
+    Cluster9  = V9,
+    Cluster10 = V10,
+    #Cluster11= V11, 
+    Site = Site)
+##remove any ind not in a Site
+admixture_df=admixture_df %>% filter(!is.na(Site) & Site != "")
+
+
+###assign colors for the map###
+cluster_colors=c("#CE4441FF", "#EE8577FF", "#FFBB44FF", "#62929AFF", "#23469c", "#859b6c", "cornflowerblue", "#004F63FF", "#592688", "#EB7926FF", "#e5b58e",  "#c969a1", "#592688", "#8164a5", "#004F63FF", "#8b9fa9", "#bac4ab")
+
+```
+Now I that the prep is done, I want to make the structure plot for the 12 Sites and combine them into one big figure.
+```{r}
+###graph it###
+##reshape the data to long format
+admix_long=admixture_df %>%
+  pivot_longer(
+    cols = starts_with("Cluster"),
+    names_to = "Cluster",
+    values_to = "Proportion")
+##determine dominant cluster
+dominant_df=admix_long %>%
+  group_by(SampleID, Site) %>%
+  slice_max(order_by = Proportion, n = 1, with_ties = FALSE) %>%
+  dplyr::select(SampleID, Site, DominantCluster = Cluster, DominantProportion = Proportion)
+##merge the two dataframes
+admix_long=admix_long %>%
+  left_join(dominant_df, by = c("SampleID", "Site"))
+##reorder based on dominant cluster
+admix_long=admix_long %>%
+  mutate(SampleID = fct_reorder(SampleID, DominantProportion, .desc = TRUE))
+##time to graph it!
+ggplot(admix_long, aes(x = SampleID, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity", width = 0.9) +
+  facet_wrap(~ Site, ncol = 2, nrow = 6, scales = "free_x") +
+  scale_fill_manual(values = cluster_colors) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    strip.text = element_text(size = 10),
+    legend.position = "right"
+  ) +
+  labs(y = "Proportion", color = "Cluster")
+```
+### K=2
+For this we have 10 Sites that have sites in so we need the admixture results from K=10.
+```{r}
+###import the qmatrix data###
+qmatrix=read.table("input_data/final_ghost_strict_LDpruned.2.1.Q")
+nrow(qmatrix)
+##add the sample IDs
+qmatrix_samples=read.table("input_data/final_ghost_strict_LDpruned.fam")$V2
+rownames(qmatrix)=qmatrix_samples
+admixture_df=cbind(Sample_ID=rownames(qmatrix), qmatrix)
+
+##fix the admixture df
+admixture_df=admixture_df %>% 
+  separate(Sample_ID, into = c("ind", "del"), sep = "_") %>% 
+  dplyr::select(-del)
+  
+
+###merge the dataframes###
+admixture_df=merge(admixture_df, meta_clean, by = "ind")
+
+###clean it up###
+##rename columns
+admixture_df <- admixture_df %>%
+  dplyr::rename(
+    SampleID  = ind,
+    Cluster1  = V1,
+    Cluster2  = V2,
+    Site = Site)
+##remove any ind not in a Site
+admixture_df=admixture_df %>% filter(!is.na(Site) & Site != "")
+
+
+###assign colors for the map###
+cluster_colors2=c("#23469c", "#859b6c", "cornflowerblue", "#004F63FF", "#592688", "#EB7926FF", "#e5b58e",  "#c969a1", "#592688", "#8164a5", "#004F63FF", "#8b9fa9", "#bac4ab")
+
+```
+Now I that the prep is done, I want to make the structure plot for the 12 Sites and combine them into one big figure.
+```{r}
+###graph it###
+##reshape the data to long format
+admix_long=admixture_df %>%
+  pivot_longer(
+    cols = starts_with("Cluster"),
+    names_to = "Cluster",
+    values_to = "Proportion")
+##determine dominant cluster
+dominant_df=admix_long %>%
+  group_by(SampleID, Site) %>%
+  slice_max(order_by = Proportion, n = 1, with_ties = FALSE) %>%
+  dplyr::select(SampleID, Site, DominantCluster = Cluster, DominantProportion = Proportion)
+##merge the two dataframes
+admix_long=admix_long %>%
+  left_join(dominant_df, by = c("SampleID", "Site"))
+##reorder based on dominant cluster
+admix_long=admix_long %>%
+  mutate(SampleID = fct_reorder(SampleID, DominantProportion, .desc = TRUE))
+##time to graph it!
+ggplot(admix_long, aes(x = SampleID, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity", width = 0.9) +
+  facet_wrap(~ Site, ncol = 2, nrow = 6, scales = "free_x") +
+  scale_fill_manual(values = cluster_colors2) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    strip.text = element_text(size = 10),
+    legend.position = "right") +
+  labs(y = "Proportion", color = "Cluster")
+```
+### K=5
+For this we have 5 groups so we need the admixture results from K=5.
+```{r}
+###import the qmatrix data###
+qmatrix=read.table("input_data/final_ghost_strict_LDpruned.5.1.Q")
+nrow(qmatrix)
+##add the sample IDs
+qmatrix_samples=read.table("input_data/final_ghost_strict_LDpruned.fam")$V2
+rownames(qmatrix)=qmatrix_samples
+admixture_df=cbind(Sample_ID=rownames(qmatrix), qmatrix)
+
+##fix the admixture df
+admixture_df=admixture_df %>% 
+  separate(Sample_ID, into = c("ind", "del"), sep = "_") %>% 
+  dplyr::select(-del)
+  
+
+###merge the dataframes###
+admixture_df=merge(admixture_df, meta_clean, by = "ind")
+
+###clean it up###
+##rename columns
+admixture_df <- admixture_df %>%
+  dplyr::rename(
+    SampleID  = ind,
+    Cluster1  = V1,
+    Cluster2  = V2,
+    Cluster3 = V3,
+    Cluster4 = V4,
+    Cluster5 = V5,
+    Site = Site)
+##remove any ind not in a Site
+admixture_df=admixture_df %>% filter(!is.na(Group) & Group != "")
+
+
+###assign colors for the map###
+cluster_colors2=c("#c969a1", "#bac4ab", "cornflowerblue", "#004F63FF", "#592688", "#EB7926FF", "#e5b58e",  "#c969a1", "#592688", "#8164a5", "#004F63FF", "#8b9fa9")
+
+```
+Now I that the prep is done, I want to make the structure plot for the 12 Sites and combine them into one big figure.
+```{r}
+###graph it###
+##reshape the data to long format
+admix_long=admixture_df %>%
+  pivot_longer(
+    cols = starts_with("Cluster"),
+    names_to = "Cluster",
+    values_to = "Proportion")
+##determine dominant cluster
+dominant_df=admix_long %>%
+  group_by(SampleID, Group) %>%
+  slice_max(order_by = Proportion, n = 1, with_ties = FALSE) %>%
+  dplyr::select(SampleID, Group, DominantCluster = Cluster, DominantProportion = Proportion)
+##merge the two dataframes
+admix_long=admix_long %>%
+  left_join(dominant_df, by = c("SampleID", "Group"))
+##reorder based on dominant cluster
+admix_long=admix_long %>%
+  mutate(SampleID = fct_reorder(SampleID, DominantProportion, .desc = TRUE))
+##time to graph it!
+ggplot(admix_long, aes(x = SampleID, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity", width = 0.9) +
+  facet_wrap(~ Group, ncol = 2, nrow = 6, scales = "free_x") +
+  scale_fill_manual(values = custom_colors_ghost) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.spacing = unit(0.2, "lines"),
+    strip.text = element_text(size = 10),
+    legend.position = "right") +
+  labs(y = "Proportion", color = "Cluster")
+```
+
+## Genetic Diversity
+Tutorials used: https://popgen.nescent.org/StartSNP.html, https://medium.com/@tarangds/knn-imputation-the-complete-guide-146f932870a7
+
+### Import Data
+This is made using a vcf file with only biallelic sites and LD pruning! It is a different input file from the PCA. There are 72 individuals.
+```{r, include=FALSE}
+###import data###
+##for this I need a genind object
+strict_vcf_ld=read.vcfR("input_data/final_ghost_strict_LDpruned.vcf", verbose = FALSE)
+
+###convert to genind
+strict_genind=vcfR2genind(strict_vcf_ld)
+```
+
+### Impute Missing Data
+From here on out, these programs cannot handle missing data. So, I need to find a way to impute the missing genotypes. For this, I want to do a nearest neighbor approach. What this does, is take the most genetically similar individuals and impute the most common genotype (alternatively you can use the mean but most of these programs can only handle discreet genotypes).
+```{r}
+###convert the genotypes
+##convert genind to dataframe
+ghost_df=genind2df(strict_genind)
+##fix rownames
+rownames(ghost_df) <- gsub("^(.*)_\\1$", "\\1", rownames(ghost_df))
+##convert alleles to numeric genotypes
+ghost_geno=apply(ghost_df, 2, function(x) {
+  x[x == "00"] <- 0  # A/A
+  x[x == "01"] <- 1  # A/B
+  x[x == "10"] <- 1  # B/A
+  x[x == "11"] <- 2  # B/B
+  as.numeric(x)
+})
+##make sure its all numeric
+ghost_geno=as.data.frame(ghost_geno)
+##convert rownames
+rownames(ghost_geno) <- rownames(ghost_df)
+
+###calculate genetic similarity
+library(proxy)
+
+##compute pairwise distances (ignoring NAs)
+ghost_geno_dist=dist(ghost_geno, method = "euclidean")
+ghost_geno_dist_matrix=as.matrix(ghost_geno_dist)
+
+###impute using k nearest neighbor
+##make a function for mode
+get_mode <- function(v) {
+  v <- v[!is.na(v)]
+  if (length(v) == 0) return(NA)
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+##make the function
+impute_knn <- function(genotype_matrix, dist_matrix, k = 5) {
+  imputed <- genotype_matrix
+  for (i in 1:nrow(genotype_matrix)) {
+    missing_loci <- which(is.na(genotype_matrix[i, ]))
+    if (length(missing_loci) > 0) {
+      neighbors <- order(dist_matrix[i, ], decreasing = FALSE)[2:(k + 1)]
+      for (locus in missing_loci) {
+        neighbor_values <- genotype_matrix[neighbors, locus]
+        mode_val <- get_mode(neighbor_values)
+        if (!is.na(mode_val)) {
+          imputed[i, locus] <- mode_val
+        }
+      }
+    }
+  }
+  rownames(imputed) <- rownames(genotype_matrix)
+  return(imputed)
+}
+
+##generate the output
+ghost_impute=impute_knn(ghost_geno, ghost_geno_dist_matrix, k=5)
+head(ghost_impute)
+
+##double check
+sum(is.na(ghost_impute))
+#it worked!!!
+
+###convert back to genind
+##convert back to alleles
+geno_char=as.data.frame(lapply(ghost_impute, function(x) {
+  x <- as.character(x)
+  x[x == "0"] <- "00"
+  x[x == "1"] <- "01"
+  x[x == "2"] <- "11"
+  return(x)
+}))
+rownames(geno_char)=rownames(ghost_impute)
+
+##convert to genind
+colnames(geno_char) <- paste0("Locus", seq_len(ncol(geno_char)))
+
+ghost_impute_genind=df2genind(geno_char, sep = "", ncode = 2, ploidy = 2, ind.names = rownames(geno_char))
+```
+### Assess Genetic Diversity
+```{r}
+###overall
+ghost_stats=basic.stats(ghost_impute, diploid = TRUE, digits = 4)
+ghost_stats$overall
+
+###allelic richness
+adegenet::summary(strict_genind)
+```
+
+#### Genetic Diversity per group
+```{r}
+###add the pops
+ghost_impute_groups=rownames_to_column(ghost_impute, var = "ind")
+ghost_impute_groups=ghost_impute_groups %>% 
+  separate(ind, into = c("ind", "delete"), sep = "_") %>% dplyr::select(-delete)
+ghost_impute_groups=right_join(meta_clean, ghost_impute_groups, by = "ind")
+ghost_impute_groups=ghost_impute_groups %>% 
+  dplyr::select(-c(E, N, Site, NAOCC.ID, Permit)) %>% 
+  column_to_rownames(var = "ind") %>% 
+  rename("pop"="Group")
+
+###convert to genind
+pop_vec <- ghost_impute_groups[,1]              # first column = population
+geno_mat <- ghost_impute_groups[,-1]            # remaining columns = SNPs
+rownames(geno_mat) <- rownames(ghost_impute_groups)
+convert_numeric_to_alleles <- function(x, ref="A", alt="T") {
+  ifelse(x == 0, paste(ref, ref, sep="/"),
+  ifelse(x == 1, paste(ref, alt, sep="/"),
+  ifelse(x == 2, paste(alt, alt, sep="/"), NA)))}
+geno_char <- as.data.frame(apply(geno_mat, 2, convert_numeric_to_alleles))
+genind_ghost_groups <- df2genind(
+  geno_char,
+  ploidy = 2,
+  sep = "/",
+  pop = pop_vec,
+  NA.char = "NA")
+
+###calculate diversity
+poppr(genind_ghost_groups)
+summary(genind_ghost_groups)
+
+ghost_impute_groups$pop <- as.factor(ghost_impute_groups[,1])
+ghost_impute_groups <- ghost_impute_groups[!is.na(ghost_impute_groups[,1]), ]
+div_groups=basic.stats(ghost_impute_groups)
+Ho_pop  <- colMeans(div_groups$Ho, na.rm = TRUE)
+He_pop  <- colMeans(div_groups$Hs, na.rm = TRUE)
+Fis_pop <- colMeans(div_groups$Fis, na.rm = TRUE)
+div_table <- data.frame(
+  Population = names(Ho_pop),
+  Ho = Ho_pop,
+  He = He_pop,
+  Fis = Fis_pop
+)
+
+div_table
+
+```
+
+#### Genetic Diversity per Site
+```{r}
+###add the pops
+ghost_impute_site=rownames_to_column(ghost_impute, var = "ind")
+ghost_impute_site=ghost_impute_site %>% 
+  separate(ind, into = c("ind", "delete"), sep = "_") %>% dplyr::select(-delete)
+ghost_impute_site=right_join(meta_clean, ghost_impute_site, by = "ind")
+ghost_impute_site=ghost_impute_site %>% 
+  dplyr::select(-c(E, N, Group, NAOCC.ID, Permit)) %>% 
+  column_to_rownames(var = "ind") %>% 
+  mutate(Site_label="site") %>% 
+  unite(col = "site", Site_label, Site, sep = "") %>%
+  rename("pop"="site")
+
+###convert to genind
+pop_vec <- ghost_impute_site[,1]              # first column = population
+geno_mat <- ghost_impute_site[,-1]            # remaining columns = SNPs
+rownames(geno_mat) <- rownames(ghost_impute_site)
+convert_numeric_to_alleles <- function(x, ref="A", alt="T") {
+  ifelse(x == 0, paste(ref, ref, sep="/"),
+  ifelse(x == 1, paste(ref, alt, sep="/"),
+  ifelse(x == 2, paste(alt, alt, sep="/"), NA)))}
+geno_char <- as.data.frame(apply(geno_mat, 2, convert_numeric_to_alleles))
+genind_ghost_site <- df2genind(
+  geno_char,
+  ploidy = 2,
+  sep = "/",
+  pop = pop_vec,
+  NA.char = "NA")
+
+###calculate diversity
+poppr(genind_ghost_site)
+summary(genind_ghost_site)
+
+ghost_impute_site$pop <- as.factor(ghost_impute_site[,1])
+ghost_impute_site <- ghost_impute_site[!is.na(ghost_impute_site[,1]), ]
+div_groups=basic.stats(ghost_impute_site)
+Ho_pop  <- colMeans(div_groups$Ho, na.rm = TRUE)
+He_pop  <- colMeans(div_groups$Hs, na.rm = TRUE)
+Fis_pop <- colMeans(div_groups$Fis, na.rm = TRUE)
+div_table <- data.frame(
+  Population = names(Ho_pop),
+  Ho = Ho_pop,
+  He = He_pop,
+  Fis = Fis_pop
+)
+
+div_table
+
+```
+
+##### Fst Heatmap per site
+This uses the package heirfstat and is based on the Weir & Cockerham estimator of Fst.
+```{r}
+###extract the pops with only 1 individual
+pop_sizes <- table(pop(genind_ghost_site))
+small_pops <- names(pop_sizes[pop_sizes < 2])
+
+###remove the pops with only 1 individual
+genind_ghost_sites_filtered=popsub(genind_ghost_site, exclude = small_pops)
+
+###calculate Fst
+Fst_hierfstat=hierfstat::pairwise.WCfst(genind_ghost_sites_filtered, diploid = TRUE)
+
+###covert to matrix
+Fst_matrix=as.matrix(Fst_hierfstat)
+
+###order the populations
+pop_levels <- c("site1", "site2", "site3", "site5", "site6", "site7", "site8", "site10", "site11")
+
+###reorder the matrix
+fst_matrix <- Fst_matrix[pop_levels, pop_levels]
+
+###melt
+fst_melt <- melt(Fst_matrix, na.rm = FALSE)
+
+###change the negative values to 0s
+fst_melt=fst_melt %>% 
+  mutate(value = replace_na(value, 0)) %>% 
+  rename("Fst"=value)
+fst_melt$Fst[fst_melt$Fst<0]="0"
+fst_melt$Fst=as.numeric(fst_melt$Fst)
+fst_melt$Var1=as.character(fst_melt$Var1)
+fst_melt$Var2=as.character(fst_melt$Var2)
+
+
+fst_melt$Var1 <- factor(fst_melt$Var1, levels = pop_levels)
+fst_melt$Var2 <- factor(fst_melt$Var2, levels = pop_levels)
+
+# Keep only upper triangle (including diagonal)
+fst_melt <- fst_melt %>%
+  filter(as.integer(Var1) <= as.integer(Var2))
+
+###graph it
+ggplot(fst_melt, aes(x = Var1, y = Var2, fill = Fst)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Fst, 3)), color = "black", size = 3) +
+  scale_x_discrete(limits = pop_levels, position = "top") +
+  scale_y_discrete(limits = pop_levels) +
+  scale_fill_gradientn(
+    colors = RColorBrewer::brewer.pal(9, "Greens"),
+    limits = c(0, 1),
+    name   = "Fst"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1),
+    axis.title   = element_blank(),
+    panel.grid   = element_blank()
+  ) +
+  ggtitle("Pairwise Weir-Cockerham Fst")
+```
