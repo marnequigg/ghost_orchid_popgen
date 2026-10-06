@@ -43,6 +43,7 @@ library(raster)
 library(viridis)
 library(sf)
 library(reshape2)
+library(rnaturalearth)
 ```
 
 ###Set Up
