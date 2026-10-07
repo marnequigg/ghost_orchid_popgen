@@ -44,6 +44,7 @@ library(viridis)
 library(sf)
 library(reshape2)
 library(rnaturalearth)
+library(plotly)
 ```
 
 ###Set Up
@@ -663,4 +664,150 @@ ggplot(fst_melt, aes(x = Var1, y = Var2, fill = Fst)) +
     panel.grid   = element_blank()
   ) +
   ggtitle("Pairwise Weir-Cockerham Fst")
+```
+
+## Genetic Diversity Across the Landscape
+I'm using the package WinGen to look at the genetic diversity across the landscape.
+This is the github: https://github.com/AnushaPB/wingen
+
+*note: I set rarify = TRUE and proceeded with default settings.
+```{r}
+###import the data
+ghost_coords=read.csv("C:/Users/mquig/Desktop/ghost_orchid/input_data/updated_coords.csv", header = TRUE)
+ghost_coords=ghost_coords %>% 
+  separate(CBG_ID, into = c("CBG_ID", "del"), sep = ",") %>% 
+  dplyr::select(-del)
+ghost_coords_only=ghost_coords %>% 
+  dplyr::select(Longitude_WGS84_dd, Latitude_WGS84_dd)
+
+###make appropriate window sizes
+coords_to_raster(ghost_coords_only, plot = TRUE)
+coords_to_raster(ghost_coords_only, buffer = 0.05, plot = TRUE)
+coords_to_raster(ghost_coords_only, buffer = 0.05, res = c(0.03, 0.03), plot = TRUE)
+raster=coords_to_raster(ghost_coords_only, buffer = 0.05, res = c(0.01, 0.01), plot = TRUE)
+raster
+
+###check window size
+preview_gd(raster, ghost_coords_only, method = "window", wdim = 3, fact = 3, sample_count = TRUE, min_n = 1)
+```
+
+Next I want to create the window. This window will move across the landscape and calculate the genetic diversity for all samples in the window.
+```{r}
+###check genetic data
+strict_vcf_ld
+
+###make sure we have the same inds in the vcf and coords in the same order
+vcf_samples=colnames(strict_vcf_ld@gt)[-1]
+vcf_samples=as.data.frame(vcf_samples)
+vcf_samples=vcf_samples %>% 
+  separate(vcf_samples, into = c("ind", "del1", "del2", "del3"), sep = "_") %>% 
+  dplyr::select(ind)
+vcf_samples=vcf_samples$ind
+##in VCF but not coords
+setdiff(vcf_samples, ghost_coords$CBG_ID)
+#0
+
+##in coords but not vcf
+missing_geno=setdiff(ghost_coords$CBG_ID, vcf_samples)
+length(missing_geno)
+#45
+
+##remove the coords that aren't in vcf
+ghost_coords_both=ghost_coords[match(vcf_samples, ghost_coords$CBG_ID), ]
+ghost_coords_only_both=ghost_coords_both %>% 
+  dplyr::select(Longitude_WGS84_dd, Latitude_WGS84_dd)
+
+###pull map
+map.polygon <- getMap(resolution = "high")
+```
+
+### Nucleotide Diversity
+```{r}
+ghost_wingen_pi=window_gd(strict_vcf_ld, ghost_coords_only_both, raster, stat = "pi", wdim = 3, fact = 3, L = 100, min_n = 3, rarify = TRUE)
+
+ggplot_gd(ghost_wingen_pi, bkg = map.polygon) +
+  ggtitle("Nucleotide Diversity (Pi)") +
+  geom_point(data = ghost_coords_only_both, aes(x=Longitude_WGS84_dd, y=Latitude_WGS84_dd), pch = 16, col = "green4", size = 1) +
+  theme_bw() +
+  #geom_polygon(data = us_map_df, aes(x = long, y = lat, group = group), fill = NA, color = "black") +
+  xlim(-82, -80.75) + 
+  ylim(25.75, 26.5) +
+  geom_path(data = map.polygon, aes(x = long, y = lat, group = group)) +
+  coord_equal()
+```
+
+### Observed Heterozygosity
+```{r}
+ghost_wingen_Ho=window_gd(strict_vcf_ld, ghost_coords_only_both, raster, stat = "Ho", wdim = 3, fact = 3, L = 100, min_n = 3, rarify = TRUE)
+
+ggplot_gd(ghost_wingen_Ho, bkg = map.polygon) +
+  ggtitle("Observed Heterozygosity") +
+  geom_point(data = ghost_coords_only_both, aes(x=Longitude_WGS84_dd, y=Latitude_WGS84_dd), pch = 16, col = "green4", size = 1) +
+  theme_bw() +
+  #geom_polygon(data = us_map_df, aes(x = long, y = lat, group = group), fill = NA, color = "black") +
+  xlim(-82, -80.75) + 
+  ylim(25.75, 26.5) +
+  geom_path(data = map.polygon, aes(x = long, y = lat, group = group)) +
+  coord_equal()
+```
+
+### Allelic Richness
+```{r}
+ghost_wingen_ar=window_gd(strict_vcf_ld, ghost_coords_only_both, raster, stat = "allelic_richness", wdim = 3, fact = 3, L = 100, min_n = 3, rarify = TRUE)
+
+ggplot_gd(ghost_wingen_ar, bkg = map.polygon) +
+  ggtitle("Allelic Richness") +
+  geom_point(data = ghost_coords_only_both, aes(x=Longitude_WGS84_dd, y=Latitude_WGS84_dd), pch = 16, col = "green4", size = 1) +
+  theme_bw() +
+  #geom_polygon(data = us_map_df, aes(x = long, y = lat, group = group), fill = NA, color = "black") +
+  xlim(-82, -80.75) + 
+  ylim(25.75, 26.5) +
+  geom_path(data = map.polygon, aes(x = long, y = lat, group = group)) +
+  coord_equal()
+```
+
+### Fis
+```{r}
+ghost_wingen_basic=window_gd(strict_vcf_ld, ghost_coords_only_both, raster, stat = "basic_stats", wdim = 3, fact = 3, L = 100, min_n = 3, rarify = TRUE)
+
+ggplot_gd(ghost_wingen_basic, index = "Fis_hierfstat", bkg = map.polygon) +
+  ggtitle("Inbreeding (Fis)") +
+  geom_point(data = ghost_coords_only_both, aes(x=Longitude_WGS84_dd, y=Latitude_WGS84_dd), pch = 16, col = "green4", size = 1) +
+  theme_bw() +
+  #geom_polygon(data = us_map_df, aes(x = long, y = lat, group = group), fill = NA, color = "black") +
+  xlim(-82, -80.75) + 
+  ylim(25.75, 26.5) +
+  geom_path(data = map.polygon, aes(x = long, y = lat, group = group)) +
+  coord_equal()
+```
+
+## Relatedness
+```{r}
+###import the data
+rel_matrix=as.data.frame(read_tsv("ghost.relatedness2"))
+
+###fix the sample names
+rel_matrix=rel_matrix %>% 
+  separate(INDV1, into = c("INDV1", "delete1", "INDV1.2", "delete1.2"), sep = "_") %>% 
+  separate(INDV2, into = c("INDV2", "delete2", "INDV2.2", "delete2.2"), sep = "_") %>%
+  dplyr::select(INDV1, INDV2, RELATEDNESS_PHI)
+
+###add the sites
+rel_matrix_sites=left_join(rel_matrix, meta_clean, by = join_by("INDV1"=="ind"))
+rel_matrix_sites <- rel_matrix %>%
+  left_join(meta_clean, by = join_by(INDV1 == ind)) %>%
+  dplyr::rename(Site1 = Site) %>%
+  left_join(meta_clean, by = join_by(INDV2 == ind)) %>%
+  dplyr::rename(Site2 = Site) %>%
+  tidyr::unite("INDV1", Site1, INDV1, sep = "_", remove = FALSE) %>%
+  tidyr::unite("INDV2", Site2, INDV2, sep = "_", remove = FALSE) %>%
+  dplyr::select(INDV1, INDV2, RELATEDNESS_PHI)
+rel_matrix_sites$INDV1 <- paste0("site", rel_matrix_sites$INDV1)
+rel_matrix_sites$INDV2 <- paste0("site", rel_matrix_sites$INDV2)
+
+###convert to matrix
+related_matrix=acast(rel_matrix_sites, INDV1 ~ INDV2, value.var = "RELATEDNESS_PHI")
+
+###plot it
+plot_ly(x = rownames(related_matrix), y = colnames(related_matrix), z = related_matrix, type = "heatmap", colorscale = "Viridis")
 ```
